@@ -140,3 +140,4 @@ sdkconfig.*
 /components
 
 data_training/
+flagged/
