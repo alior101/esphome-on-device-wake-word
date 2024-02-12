@@ -8,7 +8,20 @@ from functools import partial
 import sys
 import tensorflow as tf
 from tensorflow.lite.experimental.microfrontend.python.ops import audio_microfrontend_op as frontend_op 
+import matplotlib.pyplot as plt
+import altair as alt
+import librosa
 
+def generate_features_for_clip1(clip):
+    #mfcc = librosa.feature.mfcc(y=clip, sr=16000, n_mfcc=40)
+    sample_data = (clip/32767).astype(np.float32)
+    S = librosa.feature.melspectrogram(y=sample_data, win_length=int(480), 
+                                        hop_length=int(0.020*16000), n_fft=512, center=True,
+                                        sr=16000, n_mels=40, fmin=125, fmax=7500, power=2)#, norm=None)
+
+    S = librosa.power_to_db(S).squeeze()[:, 1:-1] 
+    return S.T
+    
 def generate_features_for_clip(clip):
     micro_frontend = frontend_op.audio_microfrontend(
         tf.convert_to_tensor(clip),
@@ -18,17 +31,13 @@ def generate_features_for_clip(clip):
         num_channels=40,
         upper_band_limit=7500,
         lower_band_limit=125,
-        enable_pcan=True,
+        enable_pcan=False,
         min_signal_remaining=0.05,
         out_scale=1,
         out_type=tf.float32)
     output = tf.multiply(micro_frontend, 0.0390625)
     return output.numpy()
 
-def features_generator(generator):
-    for data in generator:
-        for clip in data:
-            yield generate_features_for_clip(clip)
 
 infer_model = tf.lite.Interpreter(model_path="/home/lior/devel/esphome-on-device-wake-word/trained_models/okay_nabu_v5_1/tflite_stream_state_internal_quant/stream_state_internal_quantize.tflite", num_threads=1)
 infer_model.resize_tensor_input(0, [1,1,40], strict=True)  # initialize with fixed input size
@@ -44,33 +53,19 @@ print(output_details)
 print()
 
 
-# def tflite_predict(model,x):
-#     if x.shape[1] != 1280:
-#         model.resize_tensor_input(0, [1, x.shape[1]], strict=True)  # initialize with fixed input size
-#         model.allocate_tensors()
-#         input_size = x.shape[1]
-#     elif input_size != 1280:
-#         model.resize_tensor_input(0, [1, 1280], strict=True)  # initialize with fixed input size
-#         model.allocate_tensors()
-#         input_size = 1280
-
-#     model.set_tensor(melspec_input_index, x)
-#     model.invoke()
-#     return model.get_tensor(output_index)
-
-
 
 # Define function to process audio
- 
+
+detection_state = np.random.rand(100)
 #def process_audio(audio, state=collections.defaultdict(partial(collections.deque, maxlen=60))):
-def process_audio(audio, state=list[np.float32]):
+def process_audio(audio):
     # Resample audio to 16khz if needed
     if audio[0] != 16000:
         data = scipy.signal.resample(audio[1], int(float(audio[1].shape[0])/audio[0]*16000))
     
     data = data.astype(np.int16)
-    print(data.shape)
-    res = generate_features_for_clip(data)
+    
+    res = generate_features_for_clip1(data)
     # Get predictions
     for row in res:
         row1 = row.astype(np.int8)
@@ -79,82 +74,91 @@ def process_audio(audio, state=list[np.float32]):
         infer_model.invoke()
         pred = infer_model.get_tensor(output_details[0]['index'])
 
-
-        #Fill deque with zeros if it's empty
-        if len(state) == 0:
-            state.extend(np.zeros(60))
-            
         # Add prediction
-        state.append(pred[0][0])
-        state.pop(0)
+        detection_state[:-1] = detection_state[1:] 
+        detection_state[99] = pred[0,0]
         
-    
     # Make line plot
-    dfs = []
-    df = pd.DataFrame({"x": np.arange(len(state)), "y": state, "Model": "wakeword"})
-    dfs.append(df)
-    
-    df = pd.concat(dfs)
+    df = pd.DataFrame({"x": np.arange(len(detection_state)), "y": detection_state, "Model": "wakeword"})
     plot = gr.LinePlot(value = df, x='x', y='y', color="Model", y_lim = (0,1), tooltip="Model",
                                 width=600, height=300, x_title="Time (frames)", y_title="Model Score", color_legend_position="bottom")
     
 
 
-    return plot, state
+    return plot
 
 
-def process_audio1(audio, state=list[np.float32]):
+features_state = np.random.rand(40,100)
+
+def process_audio1(audio):
     # Resample audio to 16khz if needed
     if audio[0] != 16000:
         data = scipy.signal.resample(audio[1], int(float(audio[1].shape[0])/audio[0]*16000))
     
     data = data.astype(np.int16)
-    print(data.shape)
-    res = generate_features_for_clip(data)
+    #print(data.shape)
+    res = generate_features_for_clip1(data)
     # Get predictions
+
+
+    # if state == None:
+    #     state = np.random.rand(40,100)
+
     for row in res:
         row1 = row.astype(np.int8)
-        row2 = row1.reshape([1,1,40])
- 
-        #Fill deque with zeros if it's empty
-        if len(state) == 0:
-            state.extend(np.zeros(60))
+        row2 = row1.reshape([40,1])
             
-        # Add prediction
-        state.append(pred[0][0])
-        state.pop(0)
-         
-    # Make line plot
-    dfs = []
-    df = pd.DataFrame({"x": np.arange(len(state)), "y": state, "Model": "wakeword"})
-    dfs.append(df)
-    
-    df = pd.concat(dfs)
-    plot = gr.LinePlot(value = df, x='x', y='y', color="Model", y_lim = (0,1), tooltip="Model",
-                                width=600, height=300, x_title="Time (frames)", y_title="Model Score", color_legend_position="bottom")
-    
+        features_state[:,:-1] = features_state[:,1:] 
+        features_state[:,99] = row2[:,0]
 
-    
-    return plot, state
+        # Add prediction
+        # state = np.append(state, row2, 0)
+        # state = np.delete(state, 0)
+         
+    # Convert this grid to columnar data expected by Altair
+    x, y = np.meshgrid(np.arange(0,100, 1), range(0, 40))
+
+    source = pd.DataFrame({'x': x.ravel(),
+                            'y': y.ravel(),
+                            'z': features_state.ravel()})
+    return alt.Chart(source).mark_rect().encode(
+            x='x:O',
+            y='y:O',
+            color='z:Q'
+        )
+
+
 # Create Gradio interface and launch
 
 desc = """
 This is a demo of the pre-trained models included in the latest release
 """
 
-gr_int = gr.Interface(
+gr_int_mfcc = gr.Interface(
+    title = "openWakeWord Live Demo",
+    description = desc,
+    css = ".flex {flex-direction: column} .gr-panel {width: 100%}",
+    fn=process_audio1,
+    inputs=[
+        gr.Audio(sources=["microphone"], type="numpy", streaming=True, show_label=True)
+    ],
+    outputs=[
+        gr.Plot(show_label=False)
+    ],
+    live=True)
+
+gr_int_detect = gr.Interface(
     title = "openWakeWord Live Demo",
     description = desc,
     css = ".flex {flex-direction: column} .gr-panel {width: 100%}",
     fn=process_audio,
     inputs=[
-        gr.Audio(sources=["microphone"], type="numpy", streaming=True, show_label=False),
-        gr.State(value=[])
+        gr.Audio(sources=["microphone"], type="numpy", streaming=True, show_label=True)
     ],
     outputs=[
-        gr.LinePlot(show_label=False),
-        gr.State()
+        gr.LinePlot(show_label=False)
     ],
     live=True)
 
-gr_int.launch(share=True)
+#gr_int_mfcc.launch(share=True)
+gr_int_detect.launch(share=True)
